@@ -1,5 +1,7 @@
 # gcode-generator
-configurable python script for genrating photogrammetry scanner g-code
+Parametrizable python script for creating g-code files for the photogrammetry scanner.
+The g-code file is then uploaded manually to the scanner and processed. 
+The code describes the scanner movement and cammera shutter actions.
 
 **Example:**
 ```

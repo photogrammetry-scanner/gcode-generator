@@ -26,3 +26,7 @@ class CodeGeneratorBase(object):
 
     def get_postamble(self) -> List[str]:
         raise NotImplementedError()
+
+    @property
+    def suggested_file_name(self):
+        raise NotImplementedError()

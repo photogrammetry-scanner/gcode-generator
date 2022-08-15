@@ -4,6 +4,7 @@ import os
 from typing import List, Optional
 
 from code_generator import CodeGenerator
+from helpers import environ_or_default
 
 
 class CliArgs(object):
@@ -14,13 +15,14 @@ class CliArgs(object):
 
         output_group = self.parser.add_argument_group("Output")
         output_group.add_argument("-o", "--output",
-                                  help="output file name",
-                                  default="./out.g")
+                                  help="output file name; auto generated if empty; env: OUTPUT",
+                                  default=environ_or_default("OUTPUT", ""))
         output_group.add_argument("-f", "--force",
                                   help="overwrite existing file",
                                   action="store_true")
         output_group.add_argument("-c", "--compress",
-                                  help="remove comments, empty lines and strip whitespaces",
+                                  help="remove comments, empty lines and strip whitespaces; env: COMPRESS",
+                                  default=environ_or_default("COMPRESS", False),
                                   action="store_true")
 
     def parse(self):
@@ -49,12 +51,13 @@ class Exporter(object):
             print(f"failed to write file '{self.args.output}', file already exists")
             exit(1)
 
-        with open(self.args.output, mode="w") as f:
+        file_name = self.generator.suggested_file_name if len(self.args.output) <= 0 else self.args.output
+        with open(file_name, mode="w") as f:
             f.write("\n".join(self.compress(self.generator.get_preamble())) + "\n")
             f.write("\n".join(self.compress(self.generator.get_program())) + "\n")
             f.write("\n".join(self.compress(self.generator.get_postamble())) + "\n")
             f.close()
-            print(f"exported {os.stat(f.name).st_size} bytes g-code to file '{self.args.output}' using generator '{self.generator.name}' ({self.generator.description})")
+            print(f"exported {os.stat(f.name).st_size} bytes g-code to file '{file_name}' using generator '{self.generator.name}' ({self.generator.description})")
 
 
 if __name__ == "__main__":

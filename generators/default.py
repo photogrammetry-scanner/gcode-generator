@@ -162,6 +162,8 @@ class MachineParameter(object):
         self.acceleration_z_mm_s2 = 0
         self.steps_per_mm_x = 0
         self.steps_per_mm_z = 0
+        self.homing_seek_rate = 0
+        self.homing_rate = 0
 
     def update(self):
         self.axes.update()
@@ -180,11 +182,11 @@ class CodeGenerator(CodeGeneratorBase):
                        help="max feed rate [mm/minute] for travel (may involve multiple axes); if 0 falls back to machine defaults; env: FEED_RATE",
                        default=environ_or_default("FEED_RATE", 20000), type=uint)
         g.add_argument("--feed_rate_circular",
-                       help="max feed rate [mm/minute] in circular direction (X-axis); if 0 falls back to machine defaults; env: FEED_RATE_CIRCULAR",
+                       help="feed rate [mm/minute] in circular direction (X-axis); if 0 falls back to machine defaults; env: FEED_RATE_CIRCULAR",
                        default=environ_or_default("FEED_RATE_CIRCULAR", 20000), type=uint)
         g.add_argument("--feed_rate_elevation",
                        help="max feed rate [mm/minute] in elevation direction (Z-axis); if 0 falls back to machine defaults; env: FEED_RATE_ELEVATION",
-                       default=environ_or_default("FEED_RATE_ELEVATION", 200), type=uint)
+                       default=environ_or_default("FEED_RATE_ELEVATION", 800), type=uint)
         g.add_argument("--acceleration_circular",
                        help="max feed rate [mm/s²] in circular direction (X-axis); if 0 falls back to machine defaults; env: ACCELERATION_CIRCULAR",
                        default=environ_or_default("ACCELERATION_CIRCULAR", 300), type=uint)
@@ -197,6 +199,10 @@ class CodeGenerator(CodeGeneratorBase):
         g.add_argument("--steps_per_mm_elevation",
                        help="steps per [steps/mm] in circular direction (X-axis); steps_revolution*micro_steps)/pitch; if 0 falls back to machine defaults; env: STEPS_PER_MM_ELEVATION",
                        default=environ_or_default("STEPS_PER_MM_CIRCULAR", (200.0 * 16.0) / 1.25), type=uint)
+        g.add_argument("--homing_seek_rate",
+                       help="speed [mm/minute] for seeking home; seeking is the fast process, homing (slow process) will be homing_seek_rate/2; "
+                            "if 0 falls back to machine defaults; env: HOMING_SEEK_RATE",
+                       default=environ_or_default("HOMING_SEEK_RATE", 600), type=uint)
 
         g = arg_parser.add_argument_group("Circular settings")
         g.add_argument("--circle_radius",
@@ -255,6 +261,8 @@ class CodeGenerator(CodeGeneratorBase):
         self.machine.acceleration_z_mm_s2 = args.acceleration_elevation
         self.machine.steps_per_mm_x = args.steps_per_mm_circular
         self.machine.steps_per_mm_z = args.steps_per_mm_elevation
+        self.machine.homing_seek_rate = args.homing_seek_rate
+        self.machine.homing_rate = int(self.machine.homing_seek_rate / 2)
 
         # x-axis
         self.machine.axes.circular.radius_mm = args.circle_radius
@@ -296,12 +304,15 @@ class CodeGenerator(CodeGeneratorBase):
   {self.description}
 Machine settings
   max feed rate [mm/min]
-    travel:             {self.machine.feed_rate_mm_m} 
-    circular:           {self.machine.feed_rate_x_mm_m} 
+    travel:             {self.machine.feed_rate_mm_m}
+    circular:           {self.machine.feed_rate_x_mm_m}
     elevation:          {self.machine.feed_rate_z_mm_m}
   acceleration [mm/s²]
-    circular:           {self.machine.acceleration_x_mm_s2} 
-    elevation:          {self.machine.acceleration_z_mm_s2}     
+    circular:           {self.machine.acceleration_x_mm_s2}
+    elevation:          {self.machine.acceleration_z_mm_s2}
+  homing [mm/min]
+    seek rate (fast):   {self.machine.homing_seek_rate}
+    homing rate (slow): {self.machine.homing_rate}
 Circular info
   x-axis [mm]
     min (soft limit):   {self.machine.axes.circular.pos_min_mm}
@@ -345,6 +356,18 @@ Servo info
         return f"""; ----- info -----
 {nl.join([f"; {l}" for l in self.settings.splitlines()])}
 ; ----- preamble -----
+; steps per mm
+{f'$100={round(self.machine.steps_per_mm_x, 2)}' if self.machine.steps_per_mm_x > 0 else ''}
+{f'$102={round(self.machine.steps_per_mm_z, 2)}' if self.machine.steps_per_mm_z > 0 else ''}
+; acceleration
+{f'$120={self.machine.acceleration_x_mm_s2}' if self.machine.acceleration_x_mm_s2 > 0 else ''}
+{f'$122={self.machine.acceleration_z_mm_s2}' if self.machine.acceleration_z_mm_s2 > 0 else ''}
+; axis feed rates
+{f'$110={self.machine.feed_rate_x_mm_m}' if self.machine.feed_rate_x_mm_m > 0 else ''}
+{f'$112={self.machine.feed_rate_z_mm_m}' if self.machine.feed_rate_z_mm_m > 0 else ''}
+; homing feed rate
+{f'$24={self.machine.homing_rate}' if self.machine.homing_rate > 0 else ''}
+{f'$25={self.machine.homing_seek_rate}' if self.machine.homing_seek_rate > 0 else ''}
 ; home
 $H
 ; unit is mm
@@ -353,22 +376,14 @@ G21
 G53
 ; set current position manually to (X,Z)=(0,0)
 G92 X0 Y0 Z0
-; steps per mm
-{f'$100={round(self.machine.steps_per_mm_x, 2)}' if self.machine.steps_per_mm_x > 0 else ''}
-{f'$102={round(self.machine.steps_per_mm_z, 2)}' if self.machine.steps_per_mm_z > 0 else ''}
-; acceleration
-{f'$120={self.machine.acceleration_x_mm_s2}' if self.machine.acceleration_x_mm_s2 > 0 else ''}
-{f'$122={self.machine.acceleration_z_mm_s2}' if self.machine.acceleration_z_mm_s2 > 0 else ''}
-; feed rate
-{f'F{self.machine.feed_rate_mm_m}' if self.machine.feed_rate_mm_m > 0 else ''}
-{f'$110={self.machine.feed_rate_x_mm_m}' if self.machine.feed_rate_x_mm_m > 0 else ''}
-{f'$112={self.machine.feed_rate_z_mm_m}' if self.machine.feed_rate_z_mm_m > 0 else ''}
 ; absolute positioning
 G90
 ; stop spindle/servo
 M5
 ; disable servo signal
 S0
+; travel feed rate
+{f'F{self.machine.feed_rate_mm_m}' if self.machine.feed_rate_mm_m > 0 else ''}
 ; move to position (0,0): eliminates one GRBL error message
 G1 X0 Z0
 ; enable spindle/servo

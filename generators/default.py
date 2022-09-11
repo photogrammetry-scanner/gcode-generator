@@ -22,6 +22,7 @@ class Axis(object):
 
         # segment boundaries
         self.segment_count: int = 0
+        self.segment_effective_count: int = 0
         self.segment_length_mm: int = 0
         self.segment_min_idx: int = 0
         self.segment_max_idx: int = 0
@@ -44,11 +45,11 @@ class Axis(object):
 
     @property
     def is_max_pos_segment(self) -> bool:
-        return self.segment_current_idx >= self.segment_max_idx
+        return self.segment_current_idx >= self.movement_segment_stop_idx
 
     @property
     def is_min_pos_segment(self) -> bool:
-        return self.segment_current_idx <= self.segment_min_idx
+        return self.segment_current_idx <= self.movement_segment_start_idx
 
     @property
     def is_min_or_max_pos_segment(self) -> bool:
@@ -65,6 +66,7 @@ class Axis(object):
         assert (self.movement_segment_start_idx >= self.segment_min_idx)
         assert (self.movement_segment_stop_idx <= self.segment_max_idx)
         assert (self.movement_segment_start_idx <= self.movement_segment_stop_idx)
+        self.segment_effective_count = self.movement_segment_stop_idx - self.movement_segment_start_idx + 1
 
     def compute_next_position(self) -> None:
         raise NotImplementedError()
@@ -95,6 +97,7 @@ class CircularAxis(Axis):
         super().__init__()
         self.radius_mm: int = 0
         self.perimeter_mm: float = 0
+        self.increment_direction: int = 1
 
     def update(self) -> None:
         assert (self.radius_mm > 0)
@@ -110,22 +113,22 @@ class CircularAxis(Axis):
         if num_segments_to_move > segments_count -> assert(False)
         """
 
-        direction = 1
-        if self.represents_circle():
+        if self.is_closed_circle:
             if self.is_max_pos_segment:
                 self.segment_current_idx = 0
                 self.pos_current_mm = 0
                 return
         else:
             if self.is_max_pos_segment:
-                direction = -1
+                self.increment_direction = -1
             elif self.is_min_pos_segment:
-                direction = 1
+                self.increment_direction = 1
 
-        self.segment_current_idx += direction
-        self.pos_current_mm += direction * self.segment_length_mm
+        self.segment_current_idx += self.increment_direction
+        self.pos_current_mm += self.increment_direction * self.segment_length_mm
 
-    def represents_circle(self):
+    @property
+    def is_closed_circle(self):
         return self.segment_count == (self.movement_segment_stop_idx - self.movement_segment_start_idx + 1)
 
 
@@ -175,6 +178,7 @@ class CodeGenerator(CodeGeneratorBase):
     def __init__(self, arg_parser: argparse.ArgumentParser):
         super().__init__(arg_parser)
         self.machine: MachineParameter = MachineParameter()
+
         uint = lambda x: assert_uint(x)
 
         g = arg_parser.add_argument_group("Machine settings")
@@ -215,8 +219,8 @@ class CodeGenerator(CodeGeneratorBase):
                        help="segment to start at, range [1,circle_segments-1]; env: CIRCLE_SEGMENT_START",
                        default=environ_or_default("CIRCLE_SEGMENT_START", 0), type=uint)
         g.add_argument("--circle_segment_stop",
-                       help="last segment to move to, range [0,elevation_segments-1], value >= elevation_segment_start; env: CIRCLE_SEGMENT_STOP",
-                       default=environ_or_default("CIRCLE_SEGMENT_STOP", 3), type=uint)
+                       help="last segment to move to, range -1 (all segments) or [0,elevation_segments-1] value >= elevation_segment_start; env: CIRCLE_SEGMENT_STOP",
+                       default=environ_or_default("CIRCLE_SEGMENT_STOP", -1), type=int)
 
         g = arg_parser.add_argument_group("Elevation settings")
         g.add_argument("--elevation_min",
@@ -232,19 +236,19 @@ class CodeGenerator(CodeGeneratorBase):
                        help="segment to start at, range [1,elevation_segments-1]; env: ELEVATION_SEGMENT_START",
                        default=environ_or_default("ELEVATION_SEGMENT_START", 0), type=uint)
         g.add_argument("--elevation_segment_stop",
-                       help="last segment to move to, range [0,elevation_segments-1], value >= elevation_segment_start; env: ELEVATION_SEGMENT_STOP",
-                       default=environ_or_default("ELEVATION_SEGMENT_STOP", 2), type=uint)
+                       help="last segment to move to, range -1 (all segments) or [0,elevation_segments-1] value >= elevation_segment_start; env: ELEVATION_SEGMENT_STOP",
+                       default=environ_or_default("ELEVATION_SEGMENT_STOP", -1), type=int)
 
         g = arg_parser.add_argument_group("Servo settings")
         g.add_argument("--servo_position_release",
                        help="servo position when not actuating, range [0-1000]; 0=servo_off, 1=servo_min, 1000=servo_max; env: SERVO_POSITION_RELEASE",
-                       default=environ_or_default("SERVO_POSITION_RELEASE", 1), type=uint)
+                       default=environ_or_default("SERVO_POSITION_RELEASE", 1000), type=uint)
         g.add_argument("--servo_position_actuate",
                        help="servo position when actuating, range [0-1000]; 0=servo_off, 1=servo_min, 1000=servo_max; env: SERVO_POSITION_ACTUATE",
-                       default=environ_or_default("SERVO_POSITION_ACTUATE", 1000), type=uint)
+                       default=environ_or_default("SERVO_POSITION_ACTUATE", 1), type=uint)
         g.add_argument("--servo_pre_actuate_dwell",
                        help=" delay in [s] to wait before actuating, range [0.0,n]; env: SERVO_PRE_ACTUATE_DWELL",
-                       default=environ_or_default("SERVO_PRE_ACTUATE_DWELL", 0.8), type=float)
+                       default=environ_or_default("SERVO_PRE_ACTUATE_DWELL", 0.2), type=float)
         g.add_argument("--servo_actuate_dwell",
                        help=" delay in [s] to wait while actuated, range [0.0,n]; env: SERVO_ACTUATE_DWELL",
                        default=environ_or_default("SERVO_ACTUATE_DWELL", 0.2), type=float)
@@ -269,7 +273,7 @@ class CodeGenerator(CodeGeneratorBase):
         self.machine.axes.circular.segment_count = args.circle_segments
         self.machine.axes.circular.segment_current_idx = args.circle_segment_start
         self.machine.axes.circular.movement_segment_start_idx = args.circle_segment_start
-        self.machine.axes.circular.movement_segment_stop_idx = args.circle_segment_stop
+        self.machine.axes.circular.movement_segment_stop_idx = args.circle_segment_stop if args.circle_segment_stop >= 0 else args.circle_segments - 1
 
         # z-axis
         self.machine.axes.elevation.pos_min_mm = args.elevation_min
@@ -277,7 +281,7 @@ class CodeGenerator(CodeGeneratorBase):
         self.machine.axes.elevation.segment_count = args.elevation_segments
         self.machine.axes.elevation.segment_current_idx = args.elevation_segment_start
         self.machine.axes.elevation.movement_segment_start_idx = args.elevation_segment_start
-        self.machine.axes.elevation.movement_segment_stop_idx = args.elevation_segment_stop
+        self.machine.axes.elevation.movement_segment_stop_idx = args.elevation_segment_stop if args.elevation_segment_stop >= 0 else args.elevation_segments - 1
 
         # shutter servo
         self.machine.servo.pos_release = args.servo_position_release
@@ -321,9 +325,9 @@ Circular info
     radius:             {self.machine.axes.circular.radius_mm}
   segment(s):           {self.machine.axes.circular.segment_count}
     length [mm]:        {self.machine.axes.circular.segment_length_mm}
-    move from index:    {self.machine.axes.circular.movement_segment_start_idx}
-    move to index:      {self.machine.axes.circular.movement_segment_stop_idx}
-    represent circle:   {"true" if self.machine.axes.circular.represents_circle() else "false"}
+    start index:        {self.machine.axes.circular.movement_segment_start_idx}
+    stop index:         {self.machine.axes.circular.movement_segment_stop_idx}
+    is circle:          {"true" if self.machine.axes.circular.is_closed_circle else "false"}
 Elevation info
   z-axis [mm]
     min:                {self.machine.axes.elevation.pos_min_mm}
@@ -331,8 +335,8 @@ Elevation info
     travel:             {self.machine.axes.elevation.pos_travel_mm}
   segment(s):           {self.machine.axes.elevation.segment_count}
     length [mm]:        {self.machine.axes.elevation.segment_length_mm}
-    move from index:    {self.machine.axes.elevation.movement_segment_start_idx}
-    move to index:      {self.machine.axes.elevation.movement_segment_stop_idx}
+    start index:        {self.machine.axes.elevation.movement_segment_start_idx}
+    stop index:         {self.machine.axes.elevation.movement_segment_stop_idx}
 Servo info
   position
     release:            {self.machine.servo.pos_release}
@@ -352,10 +356,13 @@ Servo info
         return "Moves through circular segments (min to max and vice vesa) and advances one elevation step (min to max) at each circular boundary. Repeats until elevation max is reached."
 
     def get_preamble(self) -> List[str]:
+        print("compute preamble ...")
         nl = '\n'
-        return f"""; ----- info -----
+        preamble = f"""; >>>>> info >>>>>
 {nl.join([f"; {l}" for l in self.settings.splitlines()])}
-; ----- preamble -----
+; <<<<< info <<<<<
+
+; >>>>> preamble >>>>>
 ; steps per mm
 {f'$100={round(self.machine.steps_per_mm_x, 2)}' if self.machine.steps_per_mm_x > 0 else ''}
 {f'$102={round(self.machine.steps_per_mm_z, 2)}' if self.machine.steps_per_mm_z > 0 else ''}
@@ -394,56 +401,147 @@ S{self.machine.servo.pos_release}
 $1=255
 ; go to Z-start position
 Z{self.machine.axes.elevation.pos_current_mm}
-; ----- program -----
-""" \
-            .splitlines()
+; <<<<< preamble <<<<<
 
-    def _generate_servo_code_for_current_position(self) -> List[str]:
-        return f"""G4 P{"{:.1f}".format(self.machine.servo.pre_actuate_delay_s)}
-S{self.machine.servo.pos_actuate}
-G4 P{"{:.1f}".format(self.machine.servo.actuate_delay_s)}
-S{self.machine.servo.pos_release}
-G4 P{"{:.1f}".format(self.machine.servo.post_actuate_delay_s)}
-""" \
-            .splitlines()
+""".splitlines()
+        print("compute preamble: done")
+        return preamble
 
-    def _generate_code_for_current_position(self, reset_circular_position=False, include_elevation=False) -> List[str]:
+    def _generate_code_for_current_position(self,
+                                            with_reset_circular_position: bool = False,
+                                            with_circular_movement: bool = False,
+                                            with_elevation_movement: bool = False,
+                                            with_servo_actuation: bool = True) -> List[str]:
         code = list()
-        if reset_circular_position:
+        if with_reset_circular_position:
             code.append("; reset current position manually to X=0")
             code.append(f"G92 X0")
             code.append(f"\n; segment (circular,elevation)=({self.machine.axes.circular.segment_current_idx},{self.machine.axes.elevation.segment_current_idx})")
             code.append(f"X{'{:.1f}'.format(self.machine.axes.circular.pos_current_mm)}")
-        else:
-            code.append(f"\n; segment (circular,elevation)=({self.machine.axes.circular.segment_current_idx},{self.machine.axes.elevation.segment_current_idx})")
+
+        if with_circular_movement and with_elevation_movement:
+            code.append(f"\n; circular + elevation (circular,elevation)=({self.machine.axes.circular.segment_current_idx},{self.machine.axes.elevation.segment_current_idx})")
+            code.append("X{:.1f} Z{:.1f}".format(self.machine.axes.circular.pos_current_mm, self.machine.axes.elevation.pos_current_mm))
+        elif with_circular_movement:
+            code.append(f"\n; circular (circular,elevation)=({self.machine.axes.circular.segment_current_idx},{self.machine.axes.elevation.segment_current_idx})")
             code.append(f"X{'{:.1f}'.format(self.machine.axes.circular.pos_current_mm)}")
-        if include_elevation:
-            code.append("; enhance elevation")
+        elif with_elevation_movement:
+            code.append(f"\n; elevation (circular,elevation)=({self.machine.axes.circular.segment_current_idx},{self.machine.axes.elevation.segment_current_idx})")
             code.append(f"Z{'{:.1f}'.format(self.machine.axes.elevation.pos_current_mm)}")
-        code.extend(self._generate_servo_code_for_current_position())
+
+        if with_servo_actuation:
+            actuation = f"""G4 P{"{:.1f}".format(self.machine.servo.pre_actuate_delay_s)}
+S{self.machine.servo.pos_actuate}
+G4 P{"{:.1f}".format(self.machine.servo.actuate_delay_s)}
+S{self.machine.servo.pos_release}
+G4 P{"{:.1f}".format(self.machine.servo.post_actuate_delay_s)}
+"""
+            code.extend(actuation.splitlines())
         return code
 
-    def get_program(self) -> List[str]:
+    def _log_current_iteration(self,
+                               reset_circular: bool = False,
+                               circular_move: bool = False,
+                               elevation_move: bool = False,
+                               servo_actuation: bool = False,
+                               prefix=""):
+        print(f"{prefix}segment: (cric, elev)=({self.machine.axes.circular.segment_current_idx}, {self.machine.axes.elevation.segment_current_idx}), "
+              f"max ({self.machine.axes.circular.movement_segment_stop_idx}, {self.machine.axes.elevation.movement_segment_stop_idx}) | "
+              f"position: (circ, elev)=({round(self.machine.axes.circular.pos_current_mm, 2)}, {round(self.machine.axes.elevation.pos_current_mm, 2)}) | action:"
+              f"{' reset_circular' if reset_circular else ''}"
+              f"{' circular' if circular_move else ''}"
+              f"{' elevation' if elevation_move else ''}"
+              f"{' actuation' if servo_actuation else ''}")
+
+    def _compute_next_position_full_circle_mode(self) -> List[str]:
         program: List[str] = list()
 
-        flush_elevation = True
-        reset_circular_position = False
-        while True:
-            program.extend(self._generate_code_for_current_position(reset_circular_position, flush_elevation))
-            flush_elevation = False
-            reset_circular_position = False
-            if self.machine.axes.circular.is_max_pos_segment and self.machine.axes.elevation.is_max_pos_segment:
-                break
-            self.machine.axes.circular.compute_next_position()
-            if self.machine.axes.circular.is_min_pos_segment:
-                self.machine.axes.elevation.compute_next_position()
-                flush_elevation = True
-                reset_circular_position = True
+        reset_circular = True
+        circular_move = False
+        elevation_move = True
+        servo_actuation = False
+        self._log_current_iteration(reset_circular, circular_move, elevation_move, servo_actuation, prefix="(init ) ")
+        program.extend(self._generate_code_for_current_position(reset_circular, circular_move, elevation_move, servo_actuation))
+
+        reset_circular = False
+        circular_move = True
+        elevation_move = False
+        servo_actuation = True
+        for _elevation_segment_counter in range(0, self.machine.axes.elevation.segment_effective_count):
+            for _circular_segment_counter in range(0, self.machine.axes.circular.segment_effective_count - 1):
+                reset_circular = self.machine.axes.circular.is_min_pos_segment
+                self._log_current_iteration(reset_circular, circular_move, elevation_move, servo_actuation, prefix="(stepA) ")
+                program.extend(self._generate_code_for_current_position(reset_circular, circular_move, elevation_move, servo_actuation))
+                circular_move = True
+                elevation_move = False
+                self.machine.axes.circular.compute_next_position()
+
+            self._log_current_iteration(reset_circular, circular_move, elevation_move, servo_actuation, prefix="(stepB) ")
+            program.extend(self._generate_code_for_current_position(reset_circular, circular_move, elevation_move, servo_actuation))
+            elevation_move = True
+            circular_move = False
+            self.machine.axes.elevation.compute_next_position()
 
         return program
 
+    def _compute_next_position_arc_mode(self) -> List[str]:
+        program: List[str] = list()
+
+        reset_circular = True
+        circular_move = False
+        elevation_move = True
+        servo_actuation = False
+        self._log_current_iteration(reset_circular, circular_move, elevation_move, servo_actuation, prefix="(init ) ")
+        program.extend(self._generate_code_for_current_position(reset_circular, circular_move, elevation_move, servo_actuation))
+
+        for _elevation_segment_counter in range(0, self.machine.axes.elevation.segment_effective_count):
+            seen_min = False
+            seen_max = False
+            while not seen_min and not seen_max:
+                reset_circular = False
+                servo_actuation = True
+                self._log_current_iteration(reset_circular, circular_move, elevation_move, servo_actuation, prefix="(stepA) ")
+                program.extend(self._generate_code_for_current_position(reset_circular, circular_move, elevation_move, servo_actuation))
+                circular_move = True
+                elevation_move = False
+
+                self.machine.axes.circular.compute_next_position()
+                seen_min = True if self.machine.axes.circular.is_min_pos_segment else seen_min
+                seen_max = True if self.machine.axes.circular.is_max_pos_segment else seen_max
+
+                if self.machine.axes.circular.is_min_or_max_pos_segment:
+                    reset_circular = False
+                    circular_move = True
+                    elevation_move = False
+                    servo_actuation = True
+                    self._log_current_iteration(reset_circular, circular_move, elevation_move, servo_actuation, prefix="(stepB) ")
+                    program.extend(self._generate_code_for_current_position(reset_circular, circular_move, elevation_move, servo_actuation))
+                    circular_move = False
+                    elevation_move = True
+                    self.machine.axes.elevation.compute_next_position()
+
+        return program
+
+    def get_program(self) -> List[str]:
+        effective_circular_segments_count = self.machine.axes.circular.segment_effective_count
+        effective_elevation_segments_count = self.machine.axes.elevation.segment_effective_count
+        total_segments = effective_circular_segments_count * effective_elevation_segments_count
+        print(f"compute program in {'circular' if self.machine.axes.circular.is_closed_circle else 'arc'}-mode "
+              f"(circular_segments={effective_circular_segments_count}, elevation_segments={effective_elevation_segments_count}, total={total_segments}) ...")
+
+        program: List[str] = list()
+        program.extend(["; >>>>> program >>>>>"])
+        if self.machine.axes.circular.is_closed_circle:
+            program.extend(self._compute_next_position_full_circle_mode())
+        else:
+            program.extend(self._compute_next_position_arc_mode())
+        program.extend(["; <<<<< program <<<<<", ""])
+        print("compute program: done")
+        return program
+
     def get_postamble(self) -> List[str]:
-        return f"""; ----- postamble -----
+        print("compute postamble ...")
+        postamble = f"""; >>>>> postamble >>>>>
 ; re-enable stepper driver idling of 25ms and request movement of 0mm to activate new parameter
 $1=25
 G90
@@ -453,7 +551,7 @@ Z0
 S0
 M5
 M2
-; ----- program end -----
-
-""" \
-            .splitlines()
+; <<<<< postamble <<<<<
+""".splitlines()
+        print("compute postamble: done")
+        return postamble
